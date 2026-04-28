@@ -249,8 +249,9 @@ type MemoryConfig struct {
 }
 
 type PayloadConfig struct {
-	Kernel    string `json:"kernel"`
-	Cmdline   string `json:"cmdline"`
+	Firmware  string `json:"firmware,omitempty"`
+	Kernel    string `json:"kernel,omitempty"`
+	Cmdline   string `json:"cmdline,omitempty"`
 	Initramfs string `json:"initramfs,omitempty"`
 }
 
