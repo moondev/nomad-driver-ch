@@ -209,11 +209,6 @@ func (d *Driver) cleanupNetworking(config *domain.Config, proc *VMProcess) {
 
 // startVirtiofsd starts virtiofsd processes for each mount
 func (d *Driver) startVirtiofsd(config *domain.Config, proc *VMProcess) error {
-	if d.skipBinaryValidation {
-		d.logger.Debug("skip virtiofsd startup in validation-skip mode")
-		return nil
-	}
-
 	if d.config.VirtiofsdBin == "" {
 		// virtiofsd not available, skip mounts
 		d.logger.Debug("virtiofsd not configured, skipping mounts")
@@ -329,14 +324,17 @@ func (d *Driver) buildVMConfig(config *domain.Config, proc *VMProcess) (*VMConfi
 	}
 
 	// Cloud Hypervisor has no bootloader - kernel and initramfs are ALWAYS required
-	if kernel == "" || initramfs == "" {
-		return nil, fmt.Errorf("kernel and initramfs are required - Cloud Hypervisor has no bootloader. kernel='%s', initramfs='%s'", kernel, initramfs)
-	}
-
-	vmConfig.Payload = &PayloadConfig{
-		Kernel:    kernel,
-		Cmdline:   cmdline,
-		Initramfs: initramfs,
+	if d.config.Firmware != "" {
+		vmConfig.Payload = &PayloadConfig{Firmware: d.config.Firmware}
+	} else {
+		if kernel == "" || initramfs == "" {
+			return nil, fmt.Errorf("kernel and initramfs are required when firmware is not set: kernel=%q, initramfs=%q", kernel, initramfs)
+		}
+		vmConfig.Payload = &PayloadConfig{
+			Kernel:    kernel,
+			Cmdline:   cmdline,
+			Initramfs: initramfs,
+		}
 	}
 
 	// Add disks
@@ -409,6 +407,7 @@ func (d *Driver) startCHProcess(proc *VMProcess) error {
 	// Start CH process
 	args := []string{
 		"--api-socket", proc.APISocket,
+		"-vvv",
 	}
 
 	// Add logging
@@ -489,7 +488,7 @@ func (d *Driver) vmCreate(proc *VMProcess) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal VM config: %w", err)
 	}
-
+        d.logger.Info("vm.create payload", "body", string(body))
 	resp, err := d.httpRequest(proc.APISocket, "PUT", "/api/v1/vm.create", body)
 	if err != nil {
 		return err
@@ -618,10 +617,17 @@ func (d *Driver) cleanupProcess(config *domain.Config, proc *VMProcess) {
 		d.stopVirtiofsd(proc)
 	}
 
-	// Kill CH process
+	// Kill CH process and reap it so we don't leak zombies / orphan unix sockets
 	if proc.Pid > 0 {
 		if process, err := os.FindProcess(proc.Pid); err == nil {
-			process.Kill()
+			_ = process.Kill()
+			done := make(chan struct{})
+			go func() { _, _ = process.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				d.logger.Warn("CH process did not exit within 5s of SIGKILL", "pid", proc.Pid)
+			}
 		}
 	}
 
